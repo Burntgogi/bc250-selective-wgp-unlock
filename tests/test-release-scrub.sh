@@ -7,6 +7,9 @@ required_files=(
 	"$ROOT/README.md"
 	"$ROOT/README.ko.md"
 	"$ROOT/LICENSE"
+	"$ROOT/SECURITY.md"
+	"$ROOT/.github/CODEOWNERS"
+	"$ROOT/.github/workflows/release-checks.yml"
 	"$ROOT/patch/bc250-40cu-amdgpu.patch"
 	"$ROOT/scripts/bc250-doctor.sh"
 	"$ROOT/scripts/bc250-enable-40cu.sh"
@@ -42,7 +45,7 @@ old_helper='bc250-selective-mask-''test'
 forbidden="${private_user}|${private_home}|${model_a}|${model_b}|${model_org}|${model_runtime}|${run_stamp}|${old_state}|${old_helper}"
 
 if grep -REn "$forbidden" \
-	"$ROOT/README.md" "$ROOT/README.ko.md" "$ROOT/docs" "$ROOT/scripts" "$ROOT/patch"; then
+	"$ROOT/README.md" "$ROOT/README.ko.md" "$ROOT/SECURITY.md" "$ROOT/.github" "$ROOT/docs" "$ROOT/scripts" "$ROOT/patch"; then
 	echo "release tree contains local paths, private run artifacts, or model-specific dependencies" >&2
 	exit 1
 fi
@@ -63,3 +66,6 @@ grep -Fq 'sudo ./scripts/bc250-wgp-autotest.sh start matrix' "$ROOT/docs/quickst
 grep -Fq 'MIT License' "$ROOT/LICENSE"
 grep -Fq 'MIT' "$ROOT/README.md"
 grep -Fq 'MIT' "$ROOT/README.ko.md"
+grep -Fq '* @Burntgogi' "$ROOT/.github/CODEOWNERS"
+grep -Fq 'Only the repository owner is allowed to push or merge changes.' "$ROOT/SECURITY.md"
+grep -Fq 'tests/run-release-checks.sh' "$ROOT/.github/workflows/release-checks.yml"
