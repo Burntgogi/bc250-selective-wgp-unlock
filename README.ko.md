@@ -110,4 +110,8 @@ sudo reboot
 
 ## 라이선스
 
-MIT. [LICENSE](LICENSE)를 참고하십시오.
+이 저장소의 신규 기여분은 MIT 라이선스입니다. [LICENSE](LICENSE)를
+참고하십시오.
+
+원본 BC-250 unlock 작업에서 파생된 일부 파일은 별도 출처 또는 라이선스
+표기를 유지합니다. [NOTICE.md](NOTICE.md)를 참고하십시오.

@@ -7,7 +7,9 @@ required_files=(
 	"$ROOT/README.md"
 	"$ROOT/README.ko.md"
 	"$ROOT/LICENSE"
+	"$ROOT/NOTICE.md"
 	"$ROOT/SECURITY.md"
+	"$ROOT/LICENSES/GPL-2.0-only.txt"
 	"$ROOT/.github/CODEOWNERS"
 	"$ROOT/.github/workflows/release-checks.yml"
 	"$ROOT/patch/bc250-40cu-amdgpu.patch"
@@ -66,6 +68,14 @@ grep -Fq 'sudo ./scripts/bc250-wgp-autotest.sh start matrix' "$ROOT/docs/quickst
 grep -Fq 'MIT License' "$ROOT/LICENSE"
 grep -Fq 'MIT' "$ROOT/README.md"
 grep -Fq 'MIT' "$ROOT/README.ko.md"
+grep -Fq 'Original contributions are MIT-licensed.' "$ROOT/NOTICE.md"
+grep -Fq 'SPDX-License-Identifier: GPL-2.0-only' "$ROOT/scripts/bc250-enable-40cu.sh"
+grep -Fq 'Based-on: https://github.com/duggasco/bc250-40cu-unlock' "$ROOT/patch/bc250-40cu-amdgpu.patch"
+grep -Fq 'Signed-off-by: Burntgogi <224273819+Burntgogi@users.noreply.github.com>' "$ROOT/patch/bc250-40cu-amdgpu.patch"
+if grep -Eq '^From: duggasco|^Signed-off-by: duggasco' "$ROOT/patch/bc250-40cu-amdgpu.patch"; then
+	echo "modified patch must not present duggasco as the author/sign-off for downstream changes" >&2
+	exit 1
+fi
 grep -Fq '* @Burntgogi' "$ROOT/.github/CODEOWNERS"
 grep -Fq 'Only the repository owner is allowed to push or merge changes.' "$ROOT/SECURITY.md"
 grep -Fq 'tests/run-release-checks.sh' "$ROOT/.github/workflows/release-checks.yml"

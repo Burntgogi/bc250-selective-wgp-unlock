@@ -107,4 +107,7 @@ sudo reboot
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Original contributions are MIT-licensed. See [LICENSE](LICENSE).
+
+Some files are derived from the original BC-250 unlock work and retain separate
+provenance or license notes. See [NOTICE.md](NOTICE.md).

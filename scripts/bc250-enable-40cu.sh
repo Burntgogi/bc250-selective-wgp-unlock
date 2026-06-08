@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # bc250-enable-40cu.sh — Build and install a patched amdgpu for 40 CU on BC-250
 #
 # Usage:
@@ -11,7 +12,8 @@
 # Requirements: kernel headers, gcc, make, zstd. Must run as root on BC-250.
 # Tested on: Debian Forky kernel 6.19.14+deb14-amd64
 #
-# Authors: duggasco, Claude | License: MIT
+# Derived from duggasco/bc250-40cu-unlock; downstream mode7 changes by this repository.
+# License: GPL-2.0-only. See ../LICENSES/GPL-2.0-only.txt.
 
 set -euo pipefail
 
