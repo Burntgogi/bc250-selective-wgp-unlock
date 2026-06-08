@@ -1,0 +1,15 @@
+*.o
+*.ko
+*.ko.zst
+*.cmd
+*.mod
+*.mod.c
+*.order
+*.symvers
+*.tmp
+*.log
+build/
+dist/
+tmp/
+results.tsv
+logs/
