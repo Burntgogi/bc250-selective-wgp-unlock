@@ -21,13 +21,13 @@ KVER="$(uname -r)"
 MODDIR="/lib/modules/${KVER}"
 MODPATH="${MODDIR}/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko"
 MODSRC=""
-BUILDDIR="/tmp/bc250-40cu-build"
+BUILDDIR=""
 CONF40="/etc/modprobe.d/bc250-40cu.conf"
 BACKUP_SUFFIX=".bc250-backup-$(date +%Y%m%d)"
 BC250_PCI_ID="13fe"
 
-info()  { printf '\033[0;32m[+]\033[0m %s\n' "$*"; }
-warn()  { printf '\033[0;33m[!]\033[0m %s\n' "$*"; }
+info()  { printf '\033[0;32m[+]\033[0m %s\n' "$*" >&2; }
+warn()  { printf '\033[0;33m[!]\033[0m %s\n' "$*" >&2; }
 err()   { printf '\033[0;31m[E]\033[0m %s\n' "$*" >&2; }
 die()   { err "$@"; exit 1; }
 
@@ -127,7 +127,23 @@ check_deps() {
     fi
 }
 
+extract_source() {
+    local srcpkg="$1"
+    local source_dir
+    source_dir="$(mktemp -d "${BUILDDIR}/source.XXXXXXXX")" ||
+        die "Cannot create private source directory"
+    info "Extracting kernel source from ${srcpkg}..."
+    if ! tar xf "$srcpkg" -C "$source_dir" --strip-components=1 \
+        --wildcards '*/drivers/gpu/drm/amd/amdgpu/'; then
+        die "Failed to extract kernel source from ${srcpkg}"
+    fi
+    [ -f "${source_dir}/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c" ] ||
+        die "Kernel source package does not contain gfx_v10_0.c"
+    MODSRC="$source_dir"
+}
+
 find_source() {
+    MODSRC=""
     local d
     for d in \
         "/usr/src/linux-source-${KVER%%-*}" \
@@ -152,32 +168,21 @@ find_source() {
     fi
 
     if [ -n "$srcpkg" ]; then
-        info "Extracting kernel source from ${srcpkg}..."
-        mkdir -p "${BUILDDIR}/src"
-        tar xf "$srcpkg" -C "${BUILDDIR}/src" --strip-components=1 \
-            '*/drivers/gpu/drm/amd/amdgpu/' 2>/dev/null || true
-        if [ -f "${BUILDDIR}/src/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c" ]; then
-            MODSRC="${BUILDDIR}/src"
-            return 0
-        fi
+        extract_source "$srcpkg"
+        return 0
     fi
 
     info "Kernel source not found locally. Trying apt..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y "linux-source-${KVER%%-*}" 2>/dev/null || true
+        apt-get install -y "linux-source-${KVER%%-*}" >&2 || true
         srcpkg="/usr/src/linux-source-${KVER%%-*}.tar.xz"
         if [ -f "$srcpkg" ]; then
-            mkdir -p "${BUILDDIR}/src"
-            tar xf "$srcpkg" -C "${BUILDDIR}/src" --strip-components=1 \
-                '*/drivers/gpu/drm/amd/amdgpu/' 2>/dev/null || true
-            if [ -f "${BUILDDIR}/src/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c" ]; then
-                MODSRC="${BUILDDIR}/src"
-                return 0
-            fi
+            extract_source "$srcpkg"
+            return 0
         fi
     fi
 
-    die "Cannot find kernel source for ${KVER}. Install matching kernel source, or set BC250_KERNEL_SOURCE."
+    die "Cannot find kernel source for ${KVER}. Install matching kernel source."
 }
 
 patch_source() {
@@ -195,7 +200,7 @@ patch_source() {
         cp "$gfx" "${gfx}.pre-bc250-mode7-$(date +%Y%m%d%H%M%S)"
 
         local cc_file
-        cc_file="$(mktemp)"
+        cc_file="$(mktemp "${BUILDDIR}/cc.XXXXXXXX")"
         write_cc_patch "$cc_file"
         python3 - "$gfx" "$cc_file" <<'PY'
 import pathlib
@@ -256,14 +261,14 @@ PY
     fi
 
     local param_file
-    param_file="$(mktemp)"
+    param_file="$(mktemp "${BUILDDIR}/param.XXXXXXXX")"
     write_param_patch "$param_file"
     sed -i "/#include \"amdgpu.h\"/r ${param_file}" "$gfx"
     rm -f "$param_file"
 
     # Step 2: insert CC write block in gfx_v10_0_get_cu_info after mutex_lock
     local cc_file
-    cc_file="$(mktemp)"
+    cc_file="$(mktemp "${BUILDDIR}/cc.XXXXXXXX")"
     write_cc_patch "$cc_file"
 
     awk -v insertfile="$cc_file" '
@@ -298,13 +303,16 @@ build_module() {
     local amdgpu_dir="${MODSRC}/drivers/gpu/drm/amd/amdgpu"
     [ -d "$amdgpu_dir" ] || die "amdgpu source directory not found"
 
-    info "Building amdgpu module for kernel ${KVER} (2-5 min)..."
-    make -C "${MODDIR}/build" M="$amdgpu_dir" -j"$(nproc)" modules 2>&1 | tail -5
-
     local built="${amdgpu_dir}/amdgpu.ko"
+    # /usr/src may contain an earlier build; never accept its module as new output.
+    rm -f -- "$built" || die "Cannot remove previous amdgpu.ko"
+    info "Building amdgpu module for kernel ${KVER} (2-5 min)..."
+    if ! make -C "${MODDIR}/build" M="$amdgpu_dir" -j"$(nproc)" modules 2>&1 | tail -5 >&2; then
+        die "amdgpu module compilation failed"
+    fi
     [ -f "$built" ] || die "Build failed - amdgpu.ko not produced"
 
-    if ! strings "$built" | grep -q 'bc250_cc_write_mode'; then
+    if ! strings "$built" | grep 'bc250_cc_write_mode' >/dev/null; then
         die "Built module missing bc250_cc_write_mode - patch failed"
     fi
 
@@ -338,18 +346,27 @@ install_module() {
     info "Module installed at ${target}"
 }
 
-do_build() {
+do_build() (
     check_bc250
     check_deps
+    local temp_root="${TMPDIR:-/tmp}"
+    # A user-owned TMPDIR parent could replace a root build's private directory.
+    if (( EUID == 0 )); then temp_root=/tmp; fi
+    BUILDDIR="$(mktemp -d "$temp_root/bc250-40cu-build.XXXXXXXX")" ||
+        die "Cannot create private build directory"
+    trap 'rm -rf -- "$BUILDDIR"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     find_source
     patch_source
     local built
-    built="$(build_module)"
+    built="$(build_module)" || die "Cannot build amdgpu module"
     install_module "$built"
-    echo ""
+    echo "" >&2
     info "Done! Patched amdgpu module installed."
     info "Next: sudo ./scripts/bc250-enable-40cu.sh enable"
-}
+)
 
 do_enable() {
     printf '# BC-250 40 CU re-enablement\noptions amdgpu bc250_cc_write_mode=3\n' > "$CONF40"
@@ -430,6 +447,7 @@ do_status() {
     echo ""
 }
 
+main() {
 case "${1:-}" in
     build)   do_build ;;
     enable)  do_enable ;;
@@ -455,3 +473,8 @@ case "${1:-}" in
         echo "  ./scripts/bc250-wgp-autotest.sh queue singles"
         ;;
 esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

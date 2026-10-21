@@ -15,6 +15,24 @@ Only the repository owner is allowed to push or merge changes. External users
 may read, fork, and propose issues, but direct modification of this repository
 is not granted.
 
+## Privileged Execution
+
+Building and changing masks require trusted kernel sources and an explicitly
+authorized administrator invocation. Packaged sources and patch fragments use
+fresh private temporary directories; failed extraction or compilation cannot
+fall back to a previous build artifact.
+
+Reboot-resuming queues install root-owned script snapshots instead of executing
+a mutable checkout on later boots. Installation, state, service, and mask
+configuration paths reject unsafe ownership, writable ancestors, and symlinks.
+Default verifiers are snapshotted with their helper scripts; custom privileged
+helpers must be trusted. User verifier search paths are not placed in the root
+service environment. Root verifiers reject persisted code-search overrides.
+
+These checks do not make an untrusted initial checkout or kernel source safe.
+Review the code before authorizing its initial privileged execution. Previously
+installed services remain unchanged until a new queue is started.
+
 ## Release Checks
 
 Every release should pass:

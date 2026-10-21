@@ -15,6 +15,13 @@ tests/run-release-checks.sh exits 0
 release scrub prints no local/private matches
 ```
 
+These checks require Bash and Python 3 and can run without root or BC-250
+hardware. The build regressions exercise private extraction, cleanup, compiler
+failure, and stale-artifact rejection. Resume regressions exercise installed
+snapshots after checkout changes and unsafe-path rejection with simulated root
+ownership in temporary fixtures. They do not install a kernel module, register
+a real service, reboot, or establish on-hardware stability.
+
 ## Patch Validation
 
 If an unpatched `gfx_v10_0.c` is available:
