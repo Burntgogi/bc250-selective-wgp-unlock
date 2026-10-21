@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SELF="$(readlink -f "$0")"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 MASK="${BC250_MODE7_MASK_SCRIPT:-$SCRIPT_DIR/bc250-mode7-mask.sh}"
 VERIFY_BIN="${BC250_AUTOTEST_VERIFY_BIN:-$SCRIPT_DIR/bc250-fast-kernel-suite.sh}"
 VERIFY_MODE="${BC250_AUTOTEST_VERIFY_MODE:-gate}"
@@ -15,6 +15,9 @@ RESULTS_FILE="$STATE_DIR/results.tsv"
 LOCK_FILE="$STATE_DIR/lock"
 SERVICE_NAME="${BC250_AUTOTEST_SERVICE:-bc250-wgp-autotest.service}"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
+INSTALL_DIR="${BC250_AUTOTEST_INSTALL_DIR:-/usr/local/lib/bc250-wgp-autotest}"
+INSTALLED_SELF=""
+VERIFIER_ENV_FILE="${BC250_AUTOTEST_ENV_FILE:-}"
 SINGLE_QUEUE="0.0.3 0.0.4 0.1.3 0.1.4 1.0.3 1.0.4 1.1.3 1.1.4"
 
 PHASE="none"
@@ -69,8 +72,119 @@ need_root() {
 	[ "$(id -u)" = "0" ] || die "this command requires root"
 }
 
+# install(1) alone follows pre-existing symlinks and cannot secure writable
+# parent directories. Check every component before creating anything.
+trusted_directory() {
+	local path="$1" create="${2:-no}" part current="" owner mode
+	local -a parts=()
+	[[ "$path" = /* ]] || die "trusted directory must be absolute: $path"
+	IFS=/ read -ra parts <<<"$path"
+	for part in "" "${parts[@]}"; do
+		[ -n "$part" ] || { [ -n "$current" ] && continue; current="/"; }
+		[ "$part" != "." ] && [ "$part" != ".." ] || die "unsafe directory component: $path"
+		[ -z "$part" ] || current="${current%/}/$part"
+		[ ! -L "$current" ] || die "symlink is not a trusted directory: $current"
+		if [ ! -e "$current" ] && [ "$create" = yes ]; then
+			mkdir -m 0755 -- "$current"
+		fi
+		[ -d "$current" ] || die "missing trusted directory: $current"
+		read -r owner mode < <(stat -c '%u %a' -- "$current")
+		[ "$owner" = 0 ] && (( (8#$mode & 8#022) == 0 )) ||
+			die "directory must be root-owned and not group/world-writable: $current"
+	done
+}
+
+trusted_file() {
+	local path="$1" owner mode
+	trusted_directory "$(dirname "$path")"
+	[ ! -L "$path" ] && [ -f "$path" ] || die "not a trusted regular file: $path"
+	read -r owner mode < <(stat -c '%u %a' -- "$path")
+	[ "$owner" = 0 ] && (( (8#$mode & 8#022) == 0 )) ||
+		die "file must be root-owned and not group/world-writable: $path"
+}
+
+check_existing_file() {
+	[ ! -e "$1" ] && [ ! -L "$1" ] || trusted_file "$1"
+}
+
+trusted_mask_config() {
+	local config="${BC250_MODE7_CONF:-/etc/modprobe.d/bc250-40cu.conf}"
+	trusted_directory "$(dirname "$config")"
+	check_existing_file "$config"
+}
+
+validate_root_verifier_environment() {
+	[ "$RUN_USER" = root ] || return 0
+	local name setting value
+	local -a settings=("$@")
+	for name in BC250_AUTOTEST_VERIFY_BIN BC250_COMPUTE_VERIFY BC250_QUANT_MATMUL_VERIFY \
+		BC250_VULKAN_PREFIX CPATH LIBRARY_PATH LD_LIBRARY_PATH VK_ICD_FILENAMES \
+		VK_DRIVER_FILES VK_LAYER_PATH; do
+		[ -z "${!name+x}" ] || settings+=("$name=${!name}")
+	done
+	for setting in "${settings[@]}"; do
+		name="${setting%%=*}"
+		value="${setting#*=}"
+		[ -n "$value" ] || continue
+		case "$name" in
+			BC250_AUTOTEST_VERIFY_BIN|BC250_COMPUTE_VERIFY|BC250_QUANT_MATMUL_VERIFY)
+				trusted_file "$value"
+				;;
+			BC250_VULKAN_PREFIX|CPATH|LIBRARY_PATH|LD_LIBRARY_PATH|VK_ICD_FILENAMES|VK_DRIVER_FILES|VK_LAYER_PATH)
+				# These may transitively load mutable headers, libraries, or
+				# manifests. Checking just the named directory is insufficient.
+				die "$name cannot be safely persisted for a root verifier; select an unprivileged BC250_AUTOTEST_USER"
+				;;
+		esac
+	done
+}
+
+install_snapshot() {
+	local snapshot source name
+	need_root
+	trusted_mask_config
+	validate_root_verifier_environment
+	trusted_directory "$INSTALL_DIR" yes
+	# Custom privileged helpers must be standalone and administratively trusted.
+	# The bundled helper is explicitly approved by the sudo checkout invocation.
+	if [ -n "${BC250_MODE7_MASK_SCRIPT:-}" ]; then
+		trusted_file "$MASK"
+	fi
+	[ -x "$MASK" ] || die "missing mask script: $MASK"
+	[ -x "$VERIFY_BIN" ] || die "missing verifier: $VERIFY_BIN"
+	snapshot="$(mktemp -d "$INSTALL_DIR/run.XXXXXXXX")"
+	chmod 0755 "$snapshot"
+	install -m 0755 "$SELF" "$snapshot/bc250-wgp-autotest.sh"
+	install -m 0755 "$MASK" "$snapshot/bc250-mode7-mask.sh"
+	if [ -z "${BC250_AUTOTEST_VERIFY_BIN:-}" ]; then
+		for name in bc250-fast-kernel-suite.sh bc250-compute-verify.sh bc250-quant-matmul-verify.sh; do
+			source="$SCRIPT_DIR/$name"
+			[ -f "$source" ] || die "missing bundled verifier helper: $source"
+			install -m 0755 "$source" "$snapshot/$name"
+		done
+		VERIFY_BIN="$snapshot/bc250-fast-kernel-suite.sh"
+	fi
+	MASK="$snapshot/bc250-mode7-mask.sh"
+	INSTALLED_SELF="$snapshot/bc250-wgp-autotest.sh"
+	VERIFIER_ENV_FILE="$snapshot/verifier.env"
+	# NUL-delimited env arguments are consumed only after switching users.
+	# Loader/build search paths must never enter the root unit environment.
+	: >"$VERIFIER_ENV_FILE"
+	chmod 0644 "$VERIFIER_ENV_FILE"
+	for name in BC250_COMPUTE_VERIFY BC250_QUANT_MATMUL_VERIFY BC250_VULKAN_PREFIX \
+		CPATH LIBRARY_PATH LD_LIBRARY_PATH VK_ICD_FILENAMES VK_DRIVER_FILES \
+		VK_LAYER_PATH VK_INSTANCE_LAYERS RADV_DEBUG AMD_VULKAN_ICD MESA_VK_DEVICE_SELECT; do
+		[ -z "${!name+x}" ] || printf '%s=%s\0' "$name" "${!name}" >>"$VERIFIER_ENV_FILE"
+	done
+}
+
 ensure_state_dir() {
-	install -d -m 0755 "$STATE_DIR" "$LOG_DIR"
+	trusted_directory "$STATE_DIR" yes
+	trusted_directory "$LOG_DIR" yes
+	local file
+	for file in "$STATE_FILE" "$STATE_FILE.tmp" "$RESULTS_FILE" "$LOCK_FILE"; do
+		check_existing_file "$file"
+	done
 }
 
 save_state() {
@@ -94,6 +208,7 @@ save_state() {
 
 load_state() {
 	if [ -f "$STATE_FILE" ]; then
+		trusted_file "$STATE_FILE"
 		# shellcheck disable=SC1090
 		. "$STATE_FILE"
 	fi
@@ -102,6 +217,7 @@ load_state() {
 with_lock() {
 	ensure_state_dir
 	exec 9>"$LOCK_FILE"
+	chmod 0644 "$LOCK_FILE"
 	flock -n 9 || die "another autotest command is running"
 }
 
@@ -251,7 +367,32 @@ wait_vulkan_ready() {
 	return 1
 }
 
+service_value() {
+	local value="$1"
+	value="${value//\\/\\\\}"
+	value="${value//\"/\\\"}"
+	value="${value//%/%%}"
+	value="${value//$'\n'/\\n}"
+	value="${value//$'\r'/\\r}"
+	printf '"%s"' "$value"
+}
+
+service_command() {
+	local value="${1//\$/\$\$}"
+	service_value "$value"
+}
+
 print_service() {
+	local name
+	if [ -z "$INSTALLED_SELF" ]; then
+		[[ "$SELF" = "$INSTALL_DIR"/run.*/bc250-wgp-autotest.sh ]] ||
+			die "print-service requires an installed snapshot; start installs one automatically"
+		trusted_file "$SELF"
+		trusted_file "$MASK"
+		INSTALLED_SELF="$SELF"
+		VERIFIER_ENV_FILE="${VERIFIER_ENV_FILE:-$SCRIPT_DIR/verifier.env}"
+		trusted_file "$VERIFIER_ENV_FILE"
+	fi
 	cat <<EOF
 [Unit]
 Description=BC-250 WGP autotest resume
@@ -260,10 +401,25 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=$SELF resume
+ExecStart=$(service_command "$INSTALLED_SELF") resume
 TimeoutStartSec=30min
 StandardOutput=journal+console
 StandardError=journal+console
+Environment=$(service_value "BC250_AUTOTEST_STATE=$STATE_DIR")
+Environment=$(service_value "BC250_AUTOTEST_SERVICE=$SERVICE_NAME")
+Environment=$(service_value "BC250_AUTOTEST_INSTALL_DIR=$INSTALL_DIR")
+Environment=$(service_value "BC250_AUTOTEST_VERIFY_BIN=$VERIFY_BIN")
+Environment=$(service_value "BC250_AUTOTEST_VERIFY_MODE=$VERIFY_MODE")
+Environment=$(service_value "BC250_MODE7_MASK_SCRIPT=$MASK")
+Environment=$(service_value "BC250_AUTOTEST_ENV_FILE=$VERIFIER_ENV_FILE")
+EOF
+	for name in BC250_MODE7_CONF BC250_EXTRA_WGPS BC250_AUTOTEST_VULKAN_TIMEOUT \
+		BC250_AUTOTEST_REBOOT_DELAY BC250_AUTOTEST_BOOT_SETTLE; do
+		if [ -n "${!name+x}" ]; then
+			printf 'Environment=%s\n' "$(service_value "$name=${!name}")"
+		fi
+	done
+	cat <<EOF
 
 [Install]
 WantedBy=multi-user.target
@@ -286,15 +442,22 @@ ensure_user_access() {
 
 install_service() {
 	need_root
+	[[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "invalid service name: $SERVICE_NAME"
+	[ -n "$INSTALLED_SELF" ] || install_snapshot
+	trusted_directory "$(dirname "$SERVICE_FILE")"
+	check_existing_file "$SERVICE_FILE"
+	local temporary
+	temporary="$(mktemp "$(dirname "$SERVICE_FILE")/.bc250-service.XXXXXXXX")"
+	print_service >"$temporary"
+	chmod 0644 "$temporary"
+	mv -f -- "$temporary" "$SERVICE_FILE"
 	ensure_user_access
-	print_service >"$SERVICE_FILE"
-	chmod 0644 "$SERVICE_FILE"
 	systemctl daemon-reload
-	systemctl enable "$SERVICE_NAME" >/dev/null
+	systemctl enable -- "$SERVICE_NAME" >/dev/null
 }
 
 disable_service() {
-	systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+	systemctl disable -- "$SERVICE_NAME" >/dev/null 2>&1 || true
 	systemctl daemon-reload || true
 }
 
@@ -302,6 +465,12 @@ run_as_user_logged() {
 	local log="$1"
 	shift
 	local uid home rc
+	local -a verifier_env=()
+	if [ -n "$VERIFIER_ENV_FILE" ]; then
+		trusted_file "$VERIFIER_ENV_FILE"
+		mapfile -d '' -t verifier_env <"$VERIFIER_ENV_FILE"
+	fi
+	validate_root_verifier_environment "${verifier_env[@]}"
 
 	uid="$(id -u "$RUN_USER")"
 	home="$(getent passwd "$RUN_USER" | awk -F: '{print $6}')"
@@ -311,9 +480,10 @@ run_as_user_logged() {
 		echo "command=$*"
 		echo
 	} >"$log"
+	chmod 0644 "$log"
 
 	if [ "$RUN_USER" = "root" ]; then
-		if "$@" >>"$log" 2>&1; then
+		if env HOME="$home" "${verifier_env[@]}" "$@" >>"$log" 2>&1; then
 			rc=0
 		else
 			rc=$?
@@ -323,6 +493,7 @@ run_as_user_logged() {
 			HOME="$home" \
 			XDG_RUNTIME_DIR="/run/user/$uid" \
 			DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+			"${verifier_env[@]}" \
 			"$@" >>"$log" 2>&1; then
 			rc=0
 		else
@@ -351,8 +522,7 @@ start_queue() {
 	with_lock
 	load_state
 	[ "$PHASE" != "booting" ] && [ "$PHASE" != "running" ] || die "autotest is already active"
-	[ -x "$MASK" ] || die "missing mask script: $MASK"
-	[ -x "$VERIFY_BIN" ] || die "missing verifier: $VERIFY_BIN"
+	install_snapshot
 	"$MASK" module-check >/dev/null || die "installed amdgpu module does not support bc250_cc_write_mode=7"
 
 	ensure_state_dir
@@ -377,6 +547,7 @@ start_queue() {
 
 apply_current_and_reboot() {
 	need_root
+	trusted_mask_config
 	CURRENT_TARGET="$(target_at_index "$INDEX")" || finish_and_return_baseline
 	PHASE="booting"
 	save_state
@@ -389,6 +560,7 @@ apply_current_and_reboot() {
 
 finish_and_return_baseline() {
 	need_root
+	trusted_mask_config
 	PHASE="done"
 	CURRENT_TARGET=""
 	save_state
@@ -404,6 +576,7 @@ resume_run() {
 	need_root
 	with_lock
 	load_state
+	trusted_mask_config
 	if [ "$PHASE" = "none" ] || [ "$PHASE" = "done" ] || [ "$PHASE" = "aborted" ]; then
 		info "No active autotest run: phase=$PHASE"
 		return 0
@@ -427,6 +600,7 @@ resume_run() {
 	safe_target="${target//./_}"
 	safe_target="${safe_target//,/_}"
 	log="$LOG_DIR/${stamp}-idx${INDEX}-${safe_target}.log"
+	check_existing_file "$log"
 	started="$(date -Iseconds)"
 
 	if [ -n "$VERIFY_ARGS" ]; then
@@ -461,6 +635,7 @@ abort_run() {
 	need_root
 	with_lock
 	load_state
+	trusted_mask_config
 	PHASE="aborted"
 	LAST_RESULT="aborted"
 	save_state
@@ -541,12 +716,15 @@ install_recommended() {
 	local target
 
 	need_root
+	trusted_mask_config
 	target="$(awk -F'\t' 'NR > 1 && $6 == "PASS" && $2 != "none" && $3 + 0 > best { best = $3 + 0; target = $2 } END { print target }' "$RESULTS_FILE" 2>/dev/null || true)"
 	[ -n "$target" ] || die "no PASS target found in $RESULTS_FILE"
 	"$MASK" apply-extra-set "$target"
 	echo "recommended_active_extra_wgps=$target"
 }
 
+main() {
+	[[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "invalid service name: $SERVICE_NAME"
 case "${1:-}" in
 	start)
 		case "${2:-}" in
@@ -605,3 +783,8 @@ case "${1:-}" in
 		exit 2
 		;;
 esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	main "$@"
+fi

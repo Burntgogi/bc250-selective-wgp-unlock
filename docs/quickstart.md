@@ -16,6 +16,14 @@ sudo ./scripts/bc250-enable-40cu.sh build
 sudo reboot
 ```
 
+Packaged kernel sources are extracted into a fresh private build directory,
+which is removed when the build exits. Extraction or compilation failure stops
+installation; an old module is never accepted as a successful new build. Build
+logs go to stderr, separately from the resulting module path.
+
+Existing source trees under `/usr/src` are still administrator-trusted inputs
+and are patched and built in place. Use only trusted kernel sources.
+
 After reboot:
 
 ```bash
@@ -42,6 +50,29 @@ boot, validates it, records a TSV result, then reboots to the next target.
 ```bash
 sudo ./scripts/bc250-wgp-autotest.sh start singles
 ```
+
+The start command installs a root-owned, per-run script snapshot beneath
+`/usr/local/lib/bc250-wgp-autotest`. The resume service and privileged mask helper
+use that snapshot, not the original checkout. Editing or moving the checkout
+does not change an active run. Snapshots are retained; do not edit one to update
+a running queue.
+
+Custom `BC250_AUTOTEST_INSTALL_DIR` and `BC250_AUTOTEST_STATE` paths must be
+absolute, root-owned, and not group/world-writable, including every ancestor;
+symlink components are rejected. A custom `BC250_MODE7_MASK_SCRIPT` must also be
+a trusted standalone script, and a custom `BC250_MODE7_CONF` must have a trusted
+parent and, if present, a trusted regular target file.
+
+Custom verifiers can remain in the selected unprivileged run user's environment.
+Their build and Vulkan settings are applied only when invoking that user, not
+to the root service interpreter. Root verifiers require trusted executable paths
+and reject code-search overrides such as `CPATH`, `LD_LIBRARY_PATH`, and
+`BC250_VULKAN_PREFIX`; select an unprivileged `BC250_AUTOTEST_USER` when those
+settings are needed.
+
+`print-service` is available from an installed snapshot only. Existing active
+services from older versions are not rewritten automatically: finish or abort
+the old queue using its normal controls before starting a new snapshotted run.
 
 Check progress:
 
