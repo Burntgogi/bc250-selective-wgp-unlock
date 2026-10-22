@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 "$ROOT/tests/test-release-scrub.sh"
 "$ROOT/tests/test-script-contracts.sh"
+bash "$ROOT/tests/test-mask-safety.sh"
+bash "$ROOT/tests/test-recommendation-safety.sh"
 python3 "$ROOT/tests/test-build-safety.py"
 python3 "$ROOT/tests/test-resume-safety.py"
 
