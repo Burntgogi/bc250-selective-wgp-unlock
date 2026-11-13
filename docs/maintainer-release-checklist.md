@@ -2,6 +2,10 @@
 
 Run this checklist before publishing a release.
 
+Review upstream `actions/checkout` v4 releases when updating CI. Resolve the
+reviewed tag to its full commit SHA and update the pin in
+`.github/workflows/release-checks.yml`; retain `permissions: contents: read`.
+
 ## Source Hygiene
 
 ```bash
