@@ -181,9 +181,9 @@ config_text_for_active() {
 
 refresh_initramfs() {
 	if command -v update-initramfs >/dev/null 2>&1; then
-		update-initramfs -u -k "$(uname -r)" || true
+		update-initramfs -u -k "$(uname -r)"
 	elif command -v dracut >/dev/null 2>&1; then
-		dracut -f || true
+		dracut -f
 	fi
 }
 
@@ -197,7 +197,8 @@ install_active() {
 	trap 'rm -f "$tmp"' RETURN
 	config_text_for_active "$active_csv" >"$tmp"
 	install -m 0644 "$tmp" "$CONF"
-	refresh_initramfs
+	# Do not report success or let callers reboot with a stale initramfs mask.
+	refresh_initramfs || return $?
 	echo "installed_config=$CONF"
 	echo "active_extra_wgps=$active_csv"
 	echo "disabled_extra_wgps=$(disabled_csv_for_active "$active_csv")"
@@ -242,7 +243,7 @@ show_status() {
 disable_config() {
 	need_root
 	rm -f "$CONF"
-	refresh_initramfs
+	refresh_initramfs || return $?
 	echo "removed_config=$CONF"
 }
 

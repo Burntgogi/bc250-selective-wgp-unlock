@@ -173,12 +173,20 @@ Repeat the best candidate:
 sudo ./scripts/bc250-wgp-autotest.sh start repeat 0.0.4,0.1.4,1.0.4,0.1.3,1.0.3,1.1.3 10
 ```
 
-Install the largest PASS target recorded in the current results file:
+Install the largest target whose recorded results in the current file are all
+PASS. Any failed repeat excludes that target from both `report` and
+`install-recommended`. The queue must be complete, with all planned results for
+the selected target recorded; an in-progress or interrupted run is not eligible:
 
 ```bash
 sudo ./scripts/bc250-wgp-autotest.sh install-recommended
 sudo reboot
 ```
+
+Reboot only after mask installation succeeds. If `update-initramfs` or `dracut`
+fails, the command returns an error and autotest does not reboot. The modprobe
+configuration may already have changed; resolve the rebuild error and rerun the
+desired mask command before rebooting.
 
 Abort an active run and return to the 24CU mode7 baseline:
 

@@ -693,6 +693,35 @@ show_status() {
 	fi
 }
 
+recommended_target() {
+	load_state
+	[ "$PHASE" = done ] || return 0
+	[[ "$INDEX" =~ ^[0-9]+$ ]] && [ "$INDEX" -eq "$(target_count)" ] || return 0
+	# A target is eligible only when every recorded repeat passed. Preserve the
+	# first-tested preference when multiple stable targets have the same CU count.
+	awk -F'\t' -v planned="$TARGETS" '
+		BEGIN {
+			n = split(planned, queue, /[[:space:]]+/)
+			for (i = 1; i <= n; i++) required[queue[i]]++
+		}
+		NR > 1 && $2 != "none" && ($2 in required) {
+			observed[$2]++
+			if (!($2 in first)) first[$2] = NR
+			if ($6 != "PASS") failed[$2] = 1
+			else { passed[$2] = 1; cu[$2] = $3 + 0 }
+		}
+		END {
+			for (candidate in passed) {
+				if (!failed[candidate] && observed[candidate] == required[candidate] && (cu[candidate] > best ||
+					(cu[candidate] == best && first[candidate] < first[target]))) {
+					best = cu[candidate]
+					target = candidate
+				}
+			}
+			print target
+		}' "$RESULTS_FILE"
+}
+
 show_report() {
 	local best_target="" best_cu=0
 
@@ -705,8 +734,10 @@ show_report() {
 	else
 		cat "$RESULTS_FILE"
 	fi
-	best_target="$(awk -F'\t' 'NR > 1 && $6 == "PASS" && $2 != "none" && $3 + 0 > best { best = $3 + 0; target = $2 } END { print target }' "$RESULTS_FILE")"
-	best_cu="$(awk -F'\t' 'NR > 1 && $6 == "PASS" && $2 != "none" && $3 + 0 > best { best = $3 + 0 } END { print best + 0 }' "$RESULTS_FILE")"
+	best_target="$(recommended_target)"
+	if [ -n "$best_target" ]; then
+		best_cu="$(expected_num_cu_for_target "$best_target")"
+	fi
 	echo
 	echo "recommended_active_extra_wgps=${best_target:-none}"
 	echo "recommended_num_cu=${best_cu:-0}"
@@ -716,9 +747,10 @@ install_recommended() {
 	local target
 
 	need_root
+	with_lock
 	trusted_mask_config
-	target="$(awk -F'\t' 'NR > 1 && $6 == "PASS" && $2 != "none" && $3 + 0 > best { best = $3 + 0; target = $2 } END { print target }' "$RESULTS_FILE" 2>/dev/null || true)"
-	[ -n "$target" ] || die "no PASS target found in $RESULTS_FILE"
+	target="$(recommended_target 2>/dev/null)" || die "cannot read results: $RESULTS_FILE"
+	[ -n "$target" ] || die "no completed target with only PASS results found in $RESULTS_FILE"
 	"$MASK" apply-extra-set "$target"
 	echo "recommended_active_extra_wgps=$target"
 }
